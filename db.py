@@ -1,8 +1,14 @@
 import sqlite3
 from datetime import datetime
-from typing import List, Union, Dict, Any
+from typing import List, Union, Dict, Any, Tuple, Optional
 from aiogram.types import Message
 import logging
+import markups
+import io
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Border, Side, PatternFill
+from openpyxl.worksheet.worksheet import Worksheet
 
 
 class Database:
@@ -14,18 +20,11 @@ class Database:
             ("last_name", "TEXT"),
             ("username", "TEXT"),
             ("registration_date", "TEXT"),
-            # ("status", "TEXT"),
             ("progress", "INTEGER DEFAULT 1"),
             ("last_activity", "TEXT"),
             ("is_active", "INTEGER DEFAULT 1"),
-            ("start_message_id", "INTEGER")
-        ],
-        "questions": [
-            ("question_id", "INTEGER PRIMARY KEY"),
-            ("question_text", "TEXT"),
-            ("next_question_yes", "INTEGER"),
-            ("next_question_no", "INTEGER"),
-            ("next_question_other", "INTEGER")
+            ("start_message_id", "INTEGER"),
+            # ("start_message_text", "TEXT")
         ],
         "answers": [
             ("answer_id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
@@ -36,37 +35,12 @@ class Database:
         ]
     }
 
-    QUESTIONS = [
-        {"question_id": 1,
-         "question_text": "Приступим?",
-         "next_question_yes": 2,
-         "next_question_no": 0,
-         "next_question_other": 0},
-
-        {"question_id": 2,
-         "question_text": "Есть ли у Вас загранпаспорт, до срока окончания действия которого более 2х лет?",
-         "next_question_yes": 3,
-         "next_question_no": 3,
-         "next_question_other": 0},
-
-        {"question_id": 3,
-         "question_text": "Есть ли у Вас действующая шенгенская виза?",
-         "next_question_yes": 4,
-         "next_question_no": 5,
-         "next_question_other": 0},
-
-        {"question_id": 4,
-         "question_text": "Какой срок окончания визы?",
-         "next_question_yes": 5,
-         "next_question_no": 5,
-         "next_question_other": 0},
-
-        {"question_id": 5,
-         "question_text": "В какой стране вы сейчас находитесь?",
-         "next_question_yes": 0,
-         "next_question_no": 0,
-         "next_question_other": 0},
-    ]
+    QUESTIONS = {
+        1: "Загранпаспорт, действующий более 2х лет",
+        2: "Действующая шенгенская виза",
+        3: "Срок окончания визы",
+        4: "Страна местонахождения"
+    }
 
     def __init__(self, db_file: str) -> None:
         self.db_file = db_file
@@ -74,19 +48,11 @@ class Database:
         self.connection.row_factory = sqlite3.Row
         self.cursor = self.connection.cursor()
 
-    def initialize_questions(self):
-        self.cursor.execute("DROP TABLE IF EXISTS questions")
-        self.create_table("questions", self.TABLE_DEFINITIONS["questions"])
-
-        for question in self.QUESTIONS:
-            self.insert_into_table("questions", question)
-
     def initialize_database(self):
         with self.connection:
             for table_name, table_columns in self.TABLE_DEFINITIONS.items():
                 if table_name != "questions":
                     self.create_table(table_name, table_columns)
-            self.initialize_questions()
         logging.info("Database initialized successfully.")
 
     def create_table(self, table_name: str, columns: list):
@@ -203,12 +169,13 @@ class Database:
     def update_user_status(self, user_id: str, new_status: str):
         self.update_table("users", {"status": new_status}, {"user_id": user_id})
 
-    def record_answer(self, user_data, answer):
+    def record_answer(self, user_data, answer, question_id):
         current_time = self.get_current_time_formatted()
+        answer_text = markups.inline_button_texts.get(answer, answer)
         data = {
             "user_id": user_data["user_id"],
-            "question_id": user_data["progress"],
-            "answer_text": answer,
+            "question_id": question_id,
+            "answer_text": answer_text,
             "answer_date": current_time
         }
         self.insert_into_table("answers", data)
@@ -266,6 +233,7 @@ class Database:
             user_info_msg = f"Информация о пользователе:\n" \
                             f"Имя: {user_data['first_name']}\n" \
                             f"Фамилия: {user_data['last_name']}\n" \
+                            f"Мессенджер: {user_data['source']}\n" \
                             f"Юзернейм: @{user_data['username']}\n" \
                             f"Дата регистрации: {user_data['registration_date']}\n" \
                             f"Дата последней активности: {user_data['last_activity']}\n\n"
@@ -277,18 +245,18 @@ class Database:
             for answer in answers:
                 if answer['question_id'] == 0:
                     additional_questions.append(answer)
-                elif answer['question_id'] > 1:
+                else:
                     last_answers[answer['question_id']] = answer
             # Добавление последних ответов
             if last_answers:
                 user_info_msg += "Ответы на вопросы:\n"
                 for question_id, answer in last_answers.items():
-                    question_text = self.get_question_text(question_id)
-                    user_info_msg += f"- {question_text}: {answer['answer_text']}\n"
+                    question_text = self.QUESTIONS.get(question_id)
+                    user_info_msg += f"{question_id}. {question_text}: {answer['answer_text']}\n"
 
             # Добавление дополнительных вопросов
             if additional_questions:
-                user_info_msg += "Дополнительные вопросы:\n"
+                user_info_msg += "\nДополнительные вопросы:\n"
                 for answer in additional_questions:
                     user_info_msg += f"- {answer['answer_text']}\n"
 
@@ -304,55 +272,152 @@ class Database:
         return question['question_text'] if question else "Неизвестный вопрос"
 
     def get_report(self) -> str:
-        # Получить количество всех пользователей
+        # Получить общее количество пользователей
         total_users = self.cursor.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
-        # # Получить количество пользователей по тарифам
-        # user_tariffs = self.cursor.execute(
-        #     "SELECT t.id, t.name, COUNT(u.user_id) "
-        #     "FROM tariffs t "
-        #     "LEFT JOIN users u ON t.id = u.tariff_id "
-        #     "GROUP BY t.id, t.name "
-        #     "ORDER BY t.id"
-        # ).fetchall()
-        #
-        # # Получить количество активных и заблокированных пользователей
-        # active_users = self.cursor.execute("SELECT COUNT(*) FROM users WHERE is_active = 1").fetchone()[0]
-        # blocked_users = total_users - active_users
-        #
-        # # Получить сумму балансов всех пользователей
-        # total_balance = self.cursor.execute("SELECT SUM(balance) FROM users").fetchone()[0]
-        #
-        # # Получить сумму всех успешных покупок
-        # total_amount = self.cursor.execute(
-        #     "SELECT SUM(amount) FROM transactions WHERE status = 'CONFIRMED' AND transaction_type != 'withdrawal'"
-        # ).fetchone()[0]
-        #
-        # # Получить сумму всех успешных выводов
-        # total_withdrawn = self.cursor.execute(
-        #     "SELECT SUM(amount) FROM transactions WHERE status = 'CONFIRMED' AND transaction_type = 'withdrawal'"
-        # ).fetchone()[0]
-        #
-        # if total_amount is None:
-        #     total_amount = 0
-        # if total_balance is None:
-        #     total_balance = 0
-        # if total_withdrawn is None:
-        #     total_withdrawn = 0
-        #
-        # # Вычислить общий профит
-        # total_profit = total_amount - total_balance + total_withdrawn
-        #
-        # report = f"📊 Отчет\n\nВсего пользователей: {total_users}\n\nТарифы:\n"
-        # for i, tariff_name, count in user_tariffs:
-        #     report += f"{i}. {tariff_name}: {count}\n"
-        # report += f"\nАктивных: {active_users}\nЗаблокировано: {blocked_users}"
-        # report += f"\n\nНа счетах: {total_balance:.2f}₽"
-        # report += f"\nВсего покупок: {total_amount:.2f}₽"
-        # report += f"\nВсего выведено: {-total_withdrawn:.2f}₽"
-        # report += f"\nОбщий профит: {total_profit:.2f}₽"
+        # Получить количество пользователей по источнику
+        user_sources = self.cursor.execute(
+            "SELECT source, COUNT(*) FROM users GROUP BY source"
+        ).fetchall()
+        sources_text = "\n".join([f"{source}: {count}" for source, count in user_sources])
 
-        return f"ВСего пользователей: {total_users}"
+        # Получить количество пользователей, которые не закончили опрос
+        users_incomplete = self.cursor.execute(
+            "SELECT COUNT(*) FROM users WHERE progress > 0"
+        ).fetchone()[0]
+
+        # Получить количество активных и заблокированных пользователей
+        active_users = self.cursor.execute("SELECT COUNT(*) FROM users WHERE is_active = 1").fetchone()[0]
+        blocked_users = total_users - active_users
+
+        report = f"📊 Отчет\n\n"
+        report += f"Всего пользователей: {total_users}\n"
+        report += f"{sources_text}\n\n"
+        report += f"Не закончивших опрос: {users_incomplete}\n\n"
+        report += f"Активных: {active_users}\n"
+        report += f"Заблокировано: {blocked_users}"
+
+        return report
+
+    def create_excel_report(self) -> Tuple[io.BytesIO, str]:
+        table_names = [row[0] for row in
+                       self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()
+                       if row[0] != 'sqlite_sequence']
+
+        output = io.BytesIO()
+        dfs = {}
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            for table_name in table_names:
+                query = f"SELECT * FROM {table_name}"
+                df = pd.read_sql(query, self.connection)
+                df.to_excel(writer, sheet_name=table_name, index=False)
+                dfs[table_name] = df
+
+        output.seek(0)
+        wb = load_workbook(output)
+
+        for table_name in table_names:
+            self.apply_table_styles(wb[table_name], dfs[table_name], 1, [20] * dfs[table_name].shape[1])
+        output.seek(0)
+        wb.save(output)
+        output.seek(0)
+
+        current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        file_name = f"{current_time}Bot_report.xlsx"
+
+        return output, file_name
+
+    def get_all_users_id(self, messenger: str) -> List[str]:
+        """Возвращает список ID пользователей для заданного мессенджера."""
+        query = "SELECT user_id FROM users WHERE source = ?"
+        result = self.cursor.execute(query, (messenger,)).fetchall()
+        return [row['user_id'] for row in result]
+
+    @staticmethod
+    def apply_table_styles(sheet: Worksheet,
+                           dataframe: pd.DataFrame,
+                           start_row: int,
+                           list_with_widths: Optional[List[int]] = None,
+                           table_border: str = 'thin',
+                           header_border: str = 'thin',
+                           table_alignment: Optional[Union[str, List[str]]] = None,
+                           header_alignment: Optional[str] = None,
+                           wrap_text_table: bool = False,
+                           wrap_text_header: bool = False,
+                           cell_colors: Optional[Dict[str, List[str]]] = None,
+                           range_colors: Optional[Dict[str, List[str]]] = None,
+                           condition: Optional[callable] = None) -> None:
+        # Set column widths
+        if list_with_widths:
+            for i, width in enumerate(list_with_widths, start=1):
+                sheet.column_dimensions[chr(64 + i)].width = width
+
+        # Set borders, alignment to table
+        table_range = sheet[f"A{start_row + 1}:{chr(65 + len(dataframe.columns) - 1)}{start_row + len(dataframe)}"]
+        table_border_style = Border(top=Side(border_style=table_border),
+                                    right=Side(border_style=table_border),
+                                    bottom=Side(border_style=table_border),
+                                    left=Side(border_style=table_border))
+        if table_alignment:
+            if isinstance(table_alignment, str):
+                table_alignment_style = [
+                    Alignment(horizontal=table_alignment, vertical='center', wrap_text=wrap_text_table)
+                    for _ in
+                    range(dataframe.shape[1])]
+            else:
+                table_alignment_style = [Alignment(horizontal=t, vertical='center', wrap_text=wrap_text_table) for t in
+                                         table_alignment]
+        else:
+            table_alignment_style = []  # Пустой список, если table_alignment не определено
+
+        for row in table_range:
+            for i, cell in enumerate(row):
+                cell.border = table_border_style
+                if table_alignment and i < len(table_alignment_style):
+                    cell.alignment = table_alignment_style[i]
+
+        # Set borders, alignment to header
+        header_range = sheet[f"A{start_row}:{chr(65 + len(dataframe.columns) - 1)}{start_row}"]
+        header_border_style = Border(
+            top=Side(border_style=header_border),
+            right=Side(border_style=header_border),
+            bottom=Side(border_style=header_border),
+            left=Side(border_style=header_border)
+        )
+        header_alignment_style = Alignment(horizontal=header_alignment, vertical='center', wrap_text=wrap_text_header)
+
+        for row in header_range:
+            for cell in row:
+                cell.border = header_border_style
+                if header_alignment:
+                    cell.alignment = header_alignment_style
+
+        if cell_colors and condition:
+            for cell_coordinate, colors in cell_colors.items():
+                cell = sheet[cell_coordinate]
+                if condition(cell.value):
+                    cell.fill = PatternFill(start_color=colors[0], end_color=colors[0], fill_type="solid")
+                else:
+                    cell.fill = PatternFill(start_color=colors[1], end_color=colors[1], fill_type="solid")
+        elif cell_colors:
+            for cell_coordinate, colors in cell_colors.items():
+                cell = sheet[cell_coordinate]
+                cell.fill = PatternFill(start_color=colors[0], end_color=colors[0], fill_type="solid")
+        if range_colors and condition:
+            for cell_range, colors in range_colors.items():
+                cells = sheet[cell_range]
+                for row in cells:
+                    for cell in row:
+                        if condition(cell.value):
+                            cell.fill = PatternFill(start_color=colors[0], end_color=colors[0], fill_type="solid")
+                        else:
+                            cell.fill = PatternFill(start_color=colors[1], end_color=colors[1], fill_type="solid")
+        elif range_colors:
+            for cell_range, colors in range_colors.items():
+                cells = sheet[cell_range]
+                for row in cells:
+                    for cell in row:
+                        cell.fill = PatternFill(start_color=colors[0], end_color=colors[0], fill_type="solid")
 
     def close(self):
         if self.connection:
