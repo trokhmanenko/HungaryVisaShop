@@ -266,17 +266,24 @@ async def on_send_to_all_clicked(callback_query: types.CallbackQuery, state: FSM
         except BotBlocked:
             db.update_table('users', {'is_active': 0}, {'user_id': user_id})
             blocked_users_count += 1
+        except Exception as e:
+            print(f"Ошибка при отправке сообщения: {e}")
 
     report_msg = msg.bulk_send_report_msg(len(all_users_id), successful_sends, blocked_users_count, success=True)
-    await bot.send_message(group_chat_id, report_msg, reply_to_message_id=callback_query.message.message_id)
+    await bot.edit_message_text(chat_id=group_chat_id,
+                                message_id=callback_query.message.message_id,
+                                text=report_msg,
+                                reply_markup=None, parse_mode='HTML')
 
 
 @dp.callback_query_handler(lambda c: c.data == 'do_not_send_to_all', state=BulkSendConfirmation.confirm)
 async def process_callback_cancel(callback_query: types.CallbackQuery, state: FSMContext):
     await bot.answer_callback_query(callback_query.id)
     await state.finish()
-    await bot.send_message(group_chat_id, msg.bulk_send_report_msg(),
-                           reply_to_message_id=callback_query.message.message_id)
+    await bot.edit_message_text(chat_id=group_chat_id,
+                                message_id=callback_query.message.message_id,
+                                text=msg.bulk_send_report_msg(),
+                                reply_markup=None, parse_mode='HTML')
 
 
 async def update_message(chat_id, message_id, original_text=None, answer_text=None):

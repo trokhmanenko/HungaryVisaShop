@@ -135,7 +135,7 @@ send_to_all_question = "Вы хотите отправить это сообще
 
 def bulk_send_report_msg(all_users=None, successful_sends=0, blocked_users=0, success=False):
     if success:
-        return f"📬 Рассылка завершена!\n\nВсего пользователей: {len(all_users)}\n" \
+        return f"📬 Рассылка завершена!\n\nВсего пользователей: {all_users}\n" \
                f"Успешно доставлено: {successful_sends}\nЗаблокированные: {blocked_users}"
     else:
         return "❌ Рассылка отменена."
