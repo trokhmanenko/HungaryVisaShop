@@ -92,11 +92,15 @@ async def start(message: types.Message):
 
     user_data = db.create_and_update_user(message, 'telegram')
     if not is_user_exists:
+        await message.answer(msg.start_message(user_data), parse_mode='HTML')
         await bot.send_message(group_chat_id, f"🆕 У нас новый пользователь!🆕\n@{message.from_user.username}")
     if user_data.get('start_message_id'):
         await update_message(message.chat.id, user_data['start_message_id'])
 
-    start_message = await message.answer(msg.start_message(user_data),
+    current_step = user_data['progress']
+    current_script_item = msg.script_data.get(current_step)
+
+    start_message = await message.answer(msg.generate_message_text(current_script_item, user_data),
                                          reply_markup=markups.generate_keyboard(user_data["progress"]),
                                          parse_mode='HTML')
     db.update_table("users", {"start_message_id": start_message.message_id}, {"user_id": user_data["user_id"]})
